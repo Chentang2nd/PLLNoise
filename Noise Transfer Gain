@@ -1,0 +1,212 @@
+% 4th Order
+%        +  _____                                   ______
+% fcomp -->|Phase|-----------------R3------R4-------| VCO |---->fout
+%          |Det. |     |      |         |     |     |     |  |
+%           -----      |      |         |     |      -----   |
+%            ^ -      C1     R2        C3     C4             |
+%            |         |      |         |     |              |
+%            |        GND    C2        GND   GND             |
+%            |                |                              |
+%            |               GND         _______             |
+%            ----------------------------| 1/N |--------------
+
+
+
+%% Setup Parameters
+clear;clc;
+cap = 1.*[13e-12, 3360e-12*1.2 + 300e-12*1, 100e-12*1, 120e-12*1]; 
+res = 1.*[250, 10/1, 20/1];
+
+
+ipump = 1008e-6;                                       % Charge Pump current AlpsB=1008e-6
+Kvco_Hz = 0.4e9*1;                                     % Kvco in Hertz
+fout = 20e9;                                          %VCO frequency
+fcomp = 400e6;                                        % Reference CLK frequency 
+preN = 2;                                             % pre divider before SDM control
+sdm_order = 3;
+scale_vco = 20*log10(80e9/fout);                      % VCO PN/Total PN refer to 80G;
+
+
+
+
+ref_meas_os = -46.02 - 4 + 0.7;                       % REFCLK Measurment and simulation gap in dB, REFPLL@80G,refer to 400M,AlpsMini +0.7dB worse
+cp_meas_os = 1;                                       % cp Measurment and simulation gap in dB
+vco_meas_os = 1.3-0.5-1;                                      % vco Measurment and simulation gap in dB
+mmd_meas_os = 2 +0.5 ;                                      % mmd Measurment and simulation gap in dB
+
+
+C1 = cap(1); C2 = cap(2); C3 = cap(3); C4 = cap(4);
+R2 = res(1); R3 = res(2); R4 = res(3);
+
+% Conversion of parameters to more convenient units
+Kcp = ipump/2/pi; % phase detector gain
+Kvco = Kvco_Hz*2*pi; % vco gain in omiga
+k=1.3806485e-23;          % Boltzmann constant
+T=300;                    % Room temperature
+
+%% Loop Poll's Polynomial Coefficients
+
+A0 = C1 + C2 + C3 + C4;
+A1 = C2*R2*(C1+C3+C4) + R3*(C1+C2)*(C3+C4) + C4*R4*(C1+C2+C3);
+A2 = C1*C2*R2*R3*(C3+C4) + C4*R4*(C2*C3*R3+C1*C3*R3+C1*C2*R2+C2*C3*R2);
+A3 = C1*C2*C3*C4*R2*R3*R4;
+
+T2 = R2*C2;
+
+%% Filter Transfer Function
+Zfilt = @(s)  (1 + s.*T2)./s./(A3.*s.^3 + A2.*s.^2 + A1.*s + A0); % filter transfer function
+zfilt = @(f) Zfilt(2*pi*1i*f); % filter transfer function as a function of frequency
+
+
+%% VCO Transfer Function
+Gvco = @(s) Kvco./s; % vco transfer function
+gvco = @(f) Gvco(2*pi*1i*f); % vco transfer function expressed as a function of frequency
+
+
+%% forward path Gain Transfer Function
+N = fout / fcomp;
+G = @(s)  Kcp * Gvco(s) .* Zfilt(s);  % forward path transfer function
+
+%% Noise Transfer Function
+
+RefCLK_NG = @(s) Kcp .* Zfilt(s) .* Gvco(s)./ (1 + G(s)./N ) ;               % Reference noise transfer function
+refclk_ng = @(f) RefCLK_NG(2*pi*1i*f) ;                                      % Reference noise transfer function in Hertz
+
+CP_NG = @(s) Zfilt(s) .* Gvco(s)./ (1 + G(s)./N ) ; 
+cp_ng = @(f) CP_NG(2*pi*1i*f);
+
+Zl = @(s) ( (R2*C2.*s+1) + R3.*(R2*C1*C2.*s.^2 + C1.*s + C2.*s) ) ./ ( s.*C3.*(R2*C2.*s + 1) + (R3*C3.*s +1 ).*(R2*C1*C2.*s.^2 + C1.*s + C2.*s) );
+LP_NG = @(s) ( sqrt(4*k*T*R2)./(R2*C1.*s + C1/C2 + 1) ./(R3*C3.*s+1)./(R4*C4.*s+1) + sqrt(4*k*T*R3)./( R3*C3.*s + C3.*(R2*C2.*s+1)./((C1.*(R2*C2.*s+1)+C2)) + 1 ) ./(R4*C4.*s+1) + sqrt(4*k*T*R4)./ ( 1 + R4*C4.*s + C4.*s.*Zl(s)) ) .*Gvco(s)./ (1 + G(s)./N ) ;
+
+lp_ng = @(f) LP_NG(2*pi*1i*f);
+
+VCO_NG = @(s) 1./ (1 + G(s)./N ) ;
+vco_ng = @(f) VCO_NG(2*pi*1i*f);
+
+SDM_NG = @(s) 1 ./ (N / preN) .*  Kcp .* Zfilt(s) .* Gvco(s)./ (1 + G(s)./N ) ;
+sdm_ng = @(f) SDM_NG(2*pi*1i*f);
+
+%% Noise source power
+
+%ref noise
+ load('./REFPLL80GdB2.mat');     % pn of reference CLK in dB
+ n_ref_org = n_pntot_outdB;
+ freq = n_ref_org(:,1);
+ n_ref_org(:,2) = 10.^( n_ref_org(:,2)./10); %convert dB to power
+ 
+ %CP noise
+ n_cp_org = csvread('./CP2.csv');                           %current noise in power
+ 
+ %VCO noise
+ n_vco_org = csvread('./vco2.csv');                          % pn of vco in dB
+ n_vco_org(:,2) = 10.^(n_vco_org(:,2)./10);                  %convert dB to power
+ 
+ %mmd noise
+ n_mmd_org = csvread('./mmd2.csv');                           % pn of mmd in dB
+ n_mmd_org(:,2) = 10.^(n_mmd_org(:,2)./10);                  %convert dB to power
+ 
+ %SDM noise
+ n_sdm(:,1) = freq;
+ n_sdm(:,2) = (2*pi)^2/(12*fcomp).*(2*sin(pi*freq/fcomp)).^(2*(sdm_order-1)) .*1; % *1 SDM noise on; *0 SDM noise off
+
+ 
+ %% Output PN 
+ 
+ n_ref_out(:,1) = n_ref_org(:,1);
+ n_ref_out(:,2) = n_ref_org(:,2) .* abs( refclk_ng( n_ref_out(:,1) ) ).^2 .* 10^( (scale_vco + ref_meas_os)/10 );      %reference CLK output PN refer to 80G
+ n_ref_outdB(:,1) = n_ref_out(:,1);
+ n_ref_outdB(:,2) = 10*log10( n_ref_out(:,2) );
+ 
+ n_cp_out(:,1) = n_cp_org(:,1);
+ n_cp_out(:,2) = n_cp_org(:,2) .* abs( cp_ng( n_cp_out(:,1) ) ).^2 .* 10^( (scale_vco + cp_meas_os)/10 );             %Charge Pump output PN refer to 80G
+ n_cp_outdB(:,1) = n_cp_out(:,1); 
+ n_cp_outdB(:,2) = 10*log10( n_cp_out(:,2) );
+ 
+ n_lp_out(:,1) = freq;
+ %n_lp_out(:,2) = n_lp_org .* abs( lp_ng( freq ) ).^2 .* 10^( (scale_vco)/10 );                                       %Loop filter output PN refer to 80G
+ n_lp_out(:,2) =  abs( lp_ng( freq ) ).^2 .* 10^( (scale_vco)/10 );
+ n_lp_outdB(:,1) = n_lp_out(:,1);
+ n_lp_outdB(:,2) = 10*log10( n_lp_out(:,2) );
+ 
+ n_vco_out(:,1) = n_vco_org(:,1);
+ n_vco_out(:,2) = n_vco_org(:,2) .* abs( vco_ng( n_vco_out(:,1) ) ).^2 .* 10^( (scale_vco + vco_meas_os)/10 ) ;      %VCO output PN refer to 80G
+ n_vco_outdB(:,1) = n_vco_out(:,1);
+ n_vco_outdB(:,2) = 10*log10( n_vco_out(:,2) );
+ 
+ n_mmd_out(:,1) = n_mmd_org(:,1);
+ n_mmd_out(:,2) = n_mmd_org(:,2) .* abs( refclk_ng( n_mmd_out(:,1) ) ).^2 .* 10^( (scale_vco + mmd_meas_os)/10 );     %MMD output PN refer to 80G
+ n_mmd_outdB(:,1) = n_mmd_out(:,1); 
+ n_mmd_outdB(:,2) = 10*log10( n_mmd_out(:,2) );
+ 
+ n_sdm_out(:,1) = n_sdm(:,1);
+ n_sdm_out(:,2) = n_sdm(:,2)  .* abs( sdm_ng( n_sdm_out(:,1) ) ).^2 .* 10^( (scale_vco)/10 );                         %SDM output PN refer to 80G
+ n_sdm_outdB(:,1) =  n_sdm_out(:,1);
+ n_sdm_outdB(:,2) = 10*log10( n_sdm_out(:,2) );
+
+ n_pntot_out(:,1) = freq;
+ n_pntot_out(:,2) = n_ref_out(:,2) + n_cp_out(:,2) + n_lp_out(:,2) + n_vco_out(:,2) + n_mmd_out(:,2) + n_sdm_out(:,2);  %total output PN
+ n_pntot_outdB(:,1) = freq;
+ n_pntot_outdB(:,2) = 10*log10( n_pntot_out(:,2) );
+ 
+ %% semilogx
+ % transfer function of noise power 
+  figure;
+ semilogx( n_ref_out(:,1), 20*log10(  abs( refclk_ng( n_ref_out(:,1) ) )  ),'g');
+ hold on;
+ semilogx(  n_cp_out(:,1) , 20*log10(  abs( cp_ng( n_cp_out(:,1) ) ) ),'b');
+ semilogx(  n_lp_out(:,1) , 20*log10(  abs( lp_ng( freq ) ) ),'m');
+ semilogx( n_vco_out(:,1), 20*log10(  abs( vco_ng( n_vco_out(:,1) ) ) ),'k');
+ semilogx( n_mmd_out(:,1), 20*log10(  abs( refclk_ng( n_mmd_out(:,1) ) ) ),'y');
+ semilogx( n_sdm_out(:,1), 20*log10(  abs( sdm_ng( n_sdm_out(:,1) ) ) ),'c');grid;
+ legend('NTF of REF','NTF of CP','NTF of LP','NTF of VCO','NTF of MMD','NTF of SDM');
+ title('TF of Noise Power');xlabel('freq');ylabel('dB');
+ 
+ %PN 
+ figure;
+ semilogx( n_ref_outdB(:,1), n_ref_outdB(:,2),'g');
+ hold on;
+ semilogx( n_cp_outdB(:,1), n_cp_outdB(:,2),'b');
+ semilogx( n_lp_outdB(:,1), n_lp_outdB(:,2),'m');
+ semilogx( n_vco_outdB(:,1), n_vco_outdB(:,2),'k');
+ semilogx( n_mmd_outdB(:,1), n_mmd_outdB(:,2),'y');
+ semilogx( n_sdm_outdB(:,1), n_sdm_outdB(:,2),'c');
+ semilogx( n_pntot_outdB(:,1), n_pntot_outdB(:,2),'ro-');grid;
+ % xlim([1e5 1e7]);ylim([-150 -60]);
+ axis([1e4 1e10 -200 -60]);
+ legend('REF','CP','LP','VCO','MMD','SDM','TOTAL');
+ title('FRACPLL Phase Noise');xlabel('freq');ylabel('dBc');
+ 
+ %percentage
+ ref_per(:,1) = n_ref_out(:,1);
+ ref_per(:,2) = n_ref_out(:,2) ./ n_pntot_out(:,2);     % REFCLK PN percentage in total PN
+ 
+ cp_per(:,1) =  n_cp_out(:,1);
+ cp_per(:,2) =  n_cp_out(:,2) ./ n_pntot_out(:,2);      %CP PN percentage in total PN
+  
+ lp_per(:,1) = n_lp_out(:,1);
+ lp_per(:,2) = n_lp_out(:,2) ./ n_pntot_out(:,2);       %LP PN percentage in total PN 
+ 
+ vco_per(:,1) =  n_vco_out(:,1);
+ vco_per(:,2) =  n_vco_out(:,2) ./ n_pntot_out(:,2);     %VCO PN percentage in total PN
+ 
+ mmd_per(:,1) = n_mmd_out(:,1);
+ mmd_per(:,2) = n_mmd_out(:,2) ./ n_pntot_out(:,2);      %MMD PN percentage in total PN
+ 
+sdm_per(:,1) = n_sdm_out(:,1);
+sdm_per(:,2) = n_sdm_out(:,2) ./ n_pntot_out(:,2);      %SDM PN percentage in total PN
+
+ figure;
+ semilogx( ref_per(:,1), ref_per(:,2),'g');
+ hold on;
+ semilogx( cp_per(:,1), cp_per(:,2),'b');
+ semilogx( lp_per(:,1), lp_per(:,2),'m');
+ semilogx( vco_per(:,1), vco_per(:,2),'c');
+ semilogx( mmd_per(:,1), mmd_per(:,2),'y');
+ semilogx( sdm_per(:,1), sdm_per(:,2),'k');
+ grid;
+ 
+ legend('REF','CP','LP','VCO','MMD','SDM');
+ title('PN Percentage');xlabel('freq');
+ 
+ ind = find(freq==1e6);
+ PN_Percent_1M = [ ref_per(ind,2), cp_per(ind,2), lp_per(ind,2), vco_per(ind,2), mmd_per(ind,2), sdm_per(ind,2),]
